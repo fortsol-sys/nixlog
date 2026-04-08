@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>nixlog</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+
+    <header>
+      <span id="logo">nixlog</span>
+      <div id="toolbar">
+        <input id="search" type="text" placeholder="Search commands, paths, users…" autocomplete="off">
+        <select id="filter-exit">
+          <option value="">All exit codes</option>
+          <option value="0">Success (0)</option>
+          <option value="err">Errors (≠ 0)</option>
+        </select>
+        <select id="theme-select" title="Theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="system">System</option>
+        </select>
+        <span id="live-badge" title="Real-time connection status">● LIVE</span>
+      </div>
+    </header>
+
+    <div id="body">
+
+      <aside id="sidebar">
+        <div id="tree-root"></div>
+      </aside>
+
+      <section id="content">
+        <div id="filter-chips" hidden></div>
+        <div id="split-view" hidden>
+
+          <!-- Top pane: log entries -->
+          <div id="table-wrap">
+            <table id="log-table">
+              <colgroup>
+                <col id="col-ts"   style="width:80px">
+                <col id="col-user" style="width:80px">
+                <col id="col-pwd"  style="width:180px">
+                <col id="col-cmd">
+                <col id="col-exit" style="width:60px">
+                <col id="col-cmt"  style="width:36px">
+              </colgroup>
+              <thead>
+                <tr>
+                  <th data-col="timestamp">Time</th>
+                  <th data-col="user">User</th>
+                  <th data-col="pwd">Directory</th>
+                  <th data-col="command">Command</th>
+                  <th data-col="exit_code">Exit</th>
+                  <th class="col-actions"></th>
+                </tr>
+              </thead>
+              <tbody id="log-body"></tbody>
+            </table>
+          </div>
+
+          <!-- Horizontal resize handle -->
+          <div id="h-resize"></div>
+
+          <!-- Bottom pane: selected entry detail -->
+          <div id="detail-panel">
+            <div id="detail-content" hidden>
+              <div id="detail-left">
+                <div id="detail-command-wrap">
+                  <span class="detail-label">Command</span>
+                  <code id="d-command"></code>
+                </div>
+                <div id="detail-meta-rows">
+                  <div class="meta-row"><span class="detail-label">Time</span><span id="d-timestamp"></span><button class="filter-by-btn" data-field="timestamp" title="Filter by time">⊕</button></div>
+                  <div class="meta-row"><span class="detail-label">Exit</span><span id="d-exit"></span><button class="filter-by-btn" data-field="exit_code" title="Filter by exit code">⊕</button></div>
+                  <div class="meta-row"><span class="detail-label">User</span><span id="d-user"></span><button class="filter-by-btn" data-field="user" title="Filter by user">⊕</button></div>
+                  <div class="meta-row"><span class="detail-label">Directory</span><span id="d-pwd"></span><button class="filter-by-btn" data-field="pwd" title="Filter by directory">⊕</button></div>
+                  <div class="meta-row"><span class="detail-label">Terminal</span><span id="d-terminal"></span><button class="filter-by-btn" data-field="terminal" title="Filter by terminal">⊕</button></div>
+                  <div class="meta-row"><span class="detail-label">Session</span><span id="d-session"></span><button class="filter-by-btn" data-field="session_id" title="Filter by session">⊕</button></div>
+                </div>
+              </div>
+              <div id="detail-right">
+                <div class="detail-label" style="margin-bottom:6px">Comments</div>
+                <div id="detail-comment-list"></div>
+                <div id="detail-comment-add">
+                  <input id="detail-comment-input" class="comment-input" type="text"
+                         placeholder="Add a comment…" autocomplete="off">
+                  <button id="detail-comment-btn" class="btn-add-comment">Add</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

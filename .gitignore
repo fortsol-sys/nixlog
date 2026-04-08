@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# nixlog runtime data (logs live in ~/.nixlog, not the repo)
+*.jsonl
+*.log
+
+# Meta / internal docs (optional — remove if you want these tracked)
+Meta/Bugs/
+Meta/Sessions/

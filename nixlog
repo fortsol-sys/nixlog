@@ -1,0 +1,451 @@
+#!/usr/bin/env python3
+"""nixlog – OS-wide command logger"""
+
+import argparse
+import json
+import os
+import sys
+import uuid
+import time
+import urllib.parse
+from datetime import datetime, timezone
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+DEFAULT_LOG_DIR    = Path.home() / ".nixlog" / "logs"
+DEFAULT_CONFIG     = Path.home() / ".nixlog" / "config"
+MAX_LOG_SIZE       = 10 * 1024 * 1024  # 10 MB per daily file before creating a part file
+UI_DIR             = Path(__file__).resolve().parent / "ui"
+
+SENSITIVE_PATTERNS = [
+    "--password", "--passwd", "--token", "--secret",
+    "--private-key", "--api-key", "--auth-token",
+    "password=", "token=", "secret=", "api_key=",
+]
+
+MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".js":   "application/javascript; charset=utf-8",
+    ".css":  "text/css; charset=utf-8",
+    ".json": "application/json",
+}
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    cfg = {"log_dir": str(DEFAULT_LOG_DIR), "exclude_patterns": ""}
+    if DEFAULT_CONFIG.exists():
+        for line in DEFAULT_CONFIG.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def get_log_dir(cfg: dict) -> Path:
+    return Path(os.environ.get("NIXLOG_LOG_DIR", cfg["log_dir"]))
+
+# ─── Log helpers ──────────────────────────────────────────────────────────────
+
+def is_sensitive(cmd: str) -> bool:
+    low = cmd.lower()
+    return any(p in low for p in SENSITIVE_PATTERNS)
+
+
+def resolve_log_file(log_dir: Path, dt: datetime) -> Path:
+    """Return the path for today's log file, creating part files when the size limit is hit."""
+    day_dir = log_dir / dt.strftime("%Y/%m/%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+    stem = dt.strftime("%Y-%m-%d")
+    path = day_dir / f"{stem}.jsonl"
+    part = 2
+    while path.exists() and path.stat().st_size >= MAX_LOG_SIZE:
+        path = day_dir / f"{stem}.part{part}.jsonl"
+        part += 1
+    return path
+
+
+def comments_path(log_file: Path) -> Path:
+    """Sidecar comments file: 2026-04-08.jsonl → 2026-04-08.comments.jsonl"""
+    return log_file.with_name(log_file.stem + ".comments.jsonl")
+
+
+def read_jsonl(path: Path) -> list:
+    entries = []
+    if not path.exists():
+        return entries
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+    return entries
+
+# ─── Command: _log ────────────────────────────────────────────────────────────
+
+def cmd_log(args):
+    cfg = load_config()
+    log_dir = get_log_dir(cfg)
+    cmd = args.cmd
+
+    if is_sensitive(cmd):
+        cmd = "[redacted – sensitive flags detected]"
+
+    excluded = [p.strip() for p in cfg.get("exclude_patterns", "").split(",") if p.strip()]
+    for pat in excluded:
+        if pat and pat in cmd:
+            return  # user-defined exclusion
+
+    now = datetime.now(timezone.utc)
+    log_file = resolve_log_file(log_dir, now)
+
+    entry = {
+        "id":         str(uuid.uuid4()),
+        "timestamp":  now.isoformat(),
+        "user":       args.user or os.environ.get("USER", ""),
+        "terminal":   args.terminal or "",
+        "session_id": args.session or "",
+        "pwd":        args.pwd or "",
+        "command":    cmd,
+        "exit_code":  args.exit_code,
+    }
+
+    with open(log_file, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+# ─── Command: init ────────────────────────────────────────────────────────────
+
+def cmd_init(args):
+    if args.remove:
+        _remove_hooks()
+        return
+
+    cfg = load_config()
+    log_dir = get_log_dir(cfg)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    DEFAULT_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    if not DEFAULT_CONFIG.exists():
+        DEFAULT_CONFIG.write_text(
+            "# nixlog configuration\n"
+            f"log_dir={log_dir}\n"
+            "# exclude_patterns=pattern1,pattern2\n"
+        )
+
+    nixlog_bin = Path(__file__).resolve()
+    hook_file  = nixlog_bin.parent / "hook.sh"
+
+    if not hook_file.exists():
+        print(f"Error: hook.sh not found at {hook_file}", file=sys.stderr)
+        sys.exit(1)
+
+    hook_line = f'[ -f "{hook_file}" ] && source "{hook_file}"  # nixlog'
+
+    rc_files = [Path.home() / ".bashrc", Path.home() / ".zshrc"]
+    for rc in rc_files:
+        if not rc.exists():
+            continue
+        if "# nixlog" in rc.read_text():
+            print(f"  {rc}: already configured")
+        else:
+            with open(rc, "a") as f:
+                f.write(f"\n{hook_line}\n")
+            print(f"  {rc}: updated")
+
+    print(f"\nLog dir : {log_dir}")
+    print(f"Config  : {DEFAULT_CONFIG}")
+    print(f"\nRestart your shell or run:  source ~/.bashrc")
+
+
+def _remove_hooks():
+    marker = "# nixlog"
+    for rc in [Path.home() / ".bashrc", Path.home() / ".zshrc"]:
+        if not rc.exists():
+            continue
+        lines   = rc.read_text().splitlines()
+        cleaned = [l for l in lines if marker not in l]
+        if len(cleaned) < len(lines):
+            rc.write_text("\n".join(cleaned).rstrip() + "\n")
+            print(f"  {rc}: hook removed")
+        else:
+            print(f"  {rc}: no hook found")
+    print("\nRestart your shell to apply changes.")
+
+# ─── HTTP handler ─────────────────────────────────────────────────────────────
+
+class NixlogHandler(BaseHTTPRequestHandler):
+    log_dir: Path = None  # set by cmd_serve before server starts
+
+    # suppress default access log output
+    def log_message(self, fmt, *args):
+        pass
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _safe_log_path(self, rel: str):
+        """Resolve a client-supplied relative path and verify it stays inside log_dir."""
+        resolved = (self.log_dir / rel).resolve()
+        if not str(resolved).startswith(str(self.log_dir.resolve())):
+            return None
+        return resolved
+
+    def _send_json(self, data, status=200):
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_error(self, status, msg):
+        self._send_json({"error": msg}, status)
+
+    def _serve_static(self, path: Path):
+        if not path.exists() or not path.is_file():
+            self._send_error(404, "Not found")
+            return
+        body = path.read_bytes()
+        mime = MIME.get(path.suffix, "application/octet-stream")
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    # ── routing ──────────────────────────────────────────────────────────────
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        qs     = urllib.parse.parse_qs(parsed.query)
+        p      = parsed.path
+
+        if p in ("/", "/index.html"):
+            self._serve_static(UI_DIR / "index.html")
+        elif p == "/api/tree":
+            self._api_tree()
+        elif p == "/api/logs":
+            self._api_logs(qs)
+        elif p == "/api/stream":
+            self._api_stream(qs)
+        elif p == "/api/comments":
+            self._api_comments_get(qs)
+        else:
+            self._serve_static(UI_DIR / p.lstrip("/"))
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/comments":
+            self._api_comments_post()
+        else:
+            self._send_error(404, "Not found")
+
+    # ── API: tree ─────────────────────────────────────────────────────────────
+
+    def _api_tree(self):
+        def build(d: Path):
+            nodes = []
+            if not d.is_dir():
+                return nodes
+            for child in sorted(d.iterdir()):
+                rel = str(child.relative_to(self.log_dir))
+                if child.is_dir():
+                    nodes.append({
+                        "type": "dir", "name": child.name,
+                        "path": rel, "children": build(child),
+                    })
+                elif child.suffix == ".jsonl" and ".comments" not in child.stem:
+                    nodes.append({"type": "file", "name": child.name, "path": rel})
+            return nodes
+        self._send_json(build(self.log_dir))
+
+    # ── API: logs ─────────────────────────────────────────────────────────────
+
+    def _api_logs(self, qs):
+        rel = qs.get("path", [""])[0]
+        if not rel:
+            self._send_error(400, "path required")
+            return
+        log_file = self._safe_log_path(rel)
+        if log_file is None:
+            self._send_error(403, "Forbidden")
+            return
+
+        entries = read_jsonl(log_file)
+
+        # Merge comments keyed by entry id
+        comments_by_id: dict = {}
+        for c in read_jsonl(comments_path(log_file)):
+            eid = c.get("entry_id")
+            if eid:
+                comments_by_id.setdefault(eid, []).append(c)
+
+        for e in entries:
+            e["comments"] = comments_by_id.get(e.get("id"), [])
+
+        self._send_json(entries)
+
+    # ── API: stream (SSE) ─────────────────────────────────────────────────────
+
+    def _api_stream(self, qs):
+        rel = qs.get("path", [""])[0]
+        if not rel:
+            self._send_error(400, "path required")
+            return
+        log_file = self._safe_log_path(rel)
+        if log_file is None:
+            self._send_error(403, "Forbidden")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        # Start tailing from the current end of file
+        offset = log_file.stat().st_size if log_file.exists() else 0
+
+        try:
+            while True:
+                if log_file.exists():
+                    size = log_file.stat().st_size
+                    if size > offset:
+                        with open(log_file) as f:
+                            f.seek(offset)
+                            for line in f:
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    entry = json.loads(line)
+                                    payload = json.dumps(entry)
+                                    self.wfile.write(f"data: {payload}\n\n".encode())
+                                    self.wfile.flush()
+                                except json.JSONDecodeError:
+                                    pass
+                        offset = log_file.stat().st_size
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client disconnected
+
+    # ── API: comments ─────────────────────────────────────────────────────────
+
+    def _api_comments_get(self, qs):
+        rel = qs.get("path", [""])[0]
+        if not rel:
+            self._send_error(400, "path required")
+            return
+        log_file = self._safe_log_path(rel)
+        if log_file is None:
+            self._send_error(403, "Forbidden")
+            return
+        self._send_json(read_jsonl(comments_path(log_file)))
+
+    def _api_comments_post(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            data = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self._send_error(400, "Invalid JSON")
+            return
+
+        entry_id     = data.get("entry_id", "").strip()
+        rel          = data.get("log_path", "").strip()
+        comment_text = data.get("comment", "").strip()
+
+        if not (entry_id and rel and comment_text):
+            self._send_error(400, "entry_id, log_path, and comment are required")
+            return
+
+        log_file = self._safe_log_path(rel)
+        if log_file is None:
+            self._send_error(403, "Forbidden")
+            return
+
+        comment = {
+            "id":        str(uuid.uuid4()),
+            "entry_id":  entry_id,
+            "log_path":  rel,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "comment":   comment_text,
+        }
+        cf = comments_path(log_file)
+        with open(cf, "a") as f:
+            f.write(json.dumps(comment) + "\n")
+
+        self._send_json(comment, 201)
+
+# ─── Command: serve ───────────────────────────────────────────────────────────
+
+class _ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+def cmd_serve(args):
+    cfg     = load_config()
+    log_dir = get_log_dir(cfg)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    NixlogHandler.log_dir = log_dir
+
+    server = _ThreadedHTTPServer((args.host, args.port), NixlogHandler)
+    url    = f"http://{args.host}:{args.port}"
+    print(f"nixlog  →  {url}")
+    print(f"logs    →  {log_dir}")
+    print(f"Ctrl-C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
+def main():
+    ap  = argparse.ArgumentParser(prog="nixlog", description="OS-wide command logger")
+    sub = ap.add_subparsers(dest="command")
+
+    p_init = sub.add_parser("init", help="Set up shell hooks and log directory")
+    p_init.add_argument("--remove", action="store_true", help="Remove all nixlog hooks")
+
+    p_serve = sub.add_parser("serve", help="Launch the web UI")
+    p_serve.add_argument("--port", type=int, default=7331)
+    p_serve.add_argument("--host", default="127.0.0.1")
+
+    p_log = sub.add_parser("_log", help=argparse.SUPPRESS)
+    p_log.add_argument("--cmd",      required=True)
+    p_log.add_argument("--exit-code", type=int, default=0, dest="exit_code")
+    p_log.add_argument("--session",  default="")
+    p_log.add_argument("--pwd",      default="")
+    p_log.add_argument("--user",     default="")
+    p_log.add_argument("--terminal", default="")
+
+    args = ap.parse_args()
+
+    if args.command == "init":
+        cmd_init(args)
+    elif args.command == "serve":
+        cmd_serve(args)
+    elif args.command == "_log":
+        cmd_log(args)
+    else:
+        ap.print_help()
+
+
+if __name__ == "__main__":
+    main()
