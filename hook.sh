@@ -32,14 +32,14 @@ _NIXLOG_LAST_HIST=""   # used by bash to deduplicate history reads
 _nixlog_write() {
     local cmd="$1" exit_code="$2"
     [ -z "$cmd" ] && return
-    "$_NIXLOG_BIN" _log \
+    ( "$_NIXLOG_BIN" _log \
         --cmd        "$cmd"                    \
         --exit-code  "$exit_code"              \
         --session    "$_NIXLOG_SESSION_ID"     \
         --pwd        "$PWD"                    \
         --user       "${USER:-$(id -un)}"      \
         --terminal   "$(tty 2>/dev/null || echo '')" \
-        2>/dev/null &
+        2>/dev/null & )
 }
 
 # ─── Zsh ──────────────────────────────────────────────────────────────────────
