@@ -1,6 +1,10 @@
 # nixlog
 
-An OS-wide command logger that silently captures every command you run in a terminal — with metadata, full-text search, real-time updates, and a lightweight browser UI.
+An OS-wide command logger that silently captures every command you run in a terminal — with metadata, full-text search, real-time updates, and a lightweight browser
+
+Creating this for myself as I need this functionality in multiple environments as I work on my home-lab.
+
+### Disclaimer: This is vibe-coded. Please take precautions to ensure that your data is secure.
 
 ---
 
